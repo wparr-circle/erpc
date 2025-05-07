@@ -2,14 +2,111 @@ package common
 
 import (
 	"fmt"
+	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/erpc/erpc/util"
+	"github.com/rs/zerolog"
 )
 
+type StructTag string
+
+const (
+	TagDeprecated         StructTag = "deprecated"
+	TagDeprecatedRemoved  string    = "removed"
+	TagDeprecatedReplaced string    = "replaced"
+)
+
+// Contains checks if a field has this struct tag and returns its value
+func (t StructTag) Contains(field reflect.StructField, logger *zerolog.Logger) (string, bool) {
+	value := field.Tag.Get(string(t))
+	if logger != nil {
+		logger.Debug().
+			Str("tag", string(t)).
+			Str("raw_tag", string(field.Tag)).
+			Str("value", value).
+			Msg("parsing struct tag")
+	}
+	if value == "" {
+		// Try to find the tag in the raw string
+		tagStr := string(field.Tag)
+		if strings.Contains(tagStr, string(t)+":") {
+			parts := strings.Split(tagStr, string(t)+":")
+			if len(parts) > 1 {
+				value = strings.Trim(parts[1], "\"")
+				// Remove any trailing tags
+				if idx := strings.Index(value, "\""); idx != -1 {
+					value = value[:idx]
+				}
+				if logger != nil {
+					logger.Debug().
+						Str("parsed_value", value).
+						Msg("parsed tag from raw string")
+				}
+			}
+		}
+	}
+	return value, value != ""
+}
+
+// Validate checks if a field has this struct tag and handles it appropriately
+func (t StructTag) Validate(field reflect.StructField, path string, logger *zerolog.Logger) {
+	if value, ok := t.Contains(field, logger); ok {
+		if logger != nil {
+			logger.Debug().
+				Str("tag", string(t)).
+				Str("value", value).
+				Str("path", path).
+				Msg("validating struct tag")
+		}
+		switch t {
+		case TagDeprecated:
+			switch {
+			case value == TagDeprecatedRemoved:
+				if logger != nil {
+					logger.Warn().
+						Str("field", path).
+						Msg("This field will be removed in a future version as it is no longer needed. The functionality has been removed from the system.")
+				}
+			case strings.HasPrefix(value, TagDeprecatedReplaced+","):
+				newField := strings.TrimPrefix(value, TagDeprecatedReplaced+",")
+				if logger != nil {
+					logger.Warn().
+						Str("field", path).
+						Str("replacement", newField).
+						Msg(fmt.Sprintf("This field is deprecated and will be removed in a future version. Please use '%s' instead.", newField))
+				}
+			case value == TagDeprecatedReplaced:
+				if logger != nil {
+					logger.Warn().
+						Str("field", path).
+						Msg("This field is deprecated and will be removed in a future version.")
+				}
+			}
+		}
+	}
+}
+
 func (c *Config) Validate() error {
+	// Initialize logger with configured level
+	level := zerolog.InfoLevel
+	if c.LogLevel != "" {
+		var err error
+		level, err = zerolog.ParseLevel(c.LogLevel)
+		if err != nil {
+			return fmt.Errorf("invalid log level: %s", c.LogLevel)
+		}
+	}
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger().Level(level)
+
+	// Check for struct tags recursively
+	if err := validateStructTags(c, "", &logger); err != nil {
+		return err
+	}
+
 	if c.Server != nil {
 		if err := c.Server.Validate(); err != nil {
 			return err
@@ -60,6 +157,137 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	return nil
+}
+
+// validateStructTags recursively checks for struct tags in a struct
+func validateStructTags(v interface{}, path string, logger *zerolog.Logger) error {
+	t := reflect.TypeOf(v)
+	val := reflect.ValueOf(v)
+
+	logger.Debug().
+		Str("type", t.String()).
+		Str("path", path).
+		Msg("validating type")
+
+	// Handle pointer types
+	if t.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			logger.Debug().
+				Str("path", path).
+				Msg("nil pointer")
+			return nil
+		}
+		t = t.Elem()
+		val = val.Elem()
+		logger.Debug().
+			Str("type", t.String()).
+			Msg("dereferenced pointer")
+	}
+
+	// Handle array and slice types
+	if t.Kind() == reflect.Array || t.Kind() == reflect.Slice {
+		if val.IsNil() {
+			logger.Debug().
+				Str("path", path).
+				Msg("nil array/slice")
+			return nil
+		}
+		logger.Debug().
+			Int("length", val.Len()).
+			Str("path", path).
+			Str("type", t.String()).
+			Msg("processing array/slice")
+		for i := 0; i < val.Len(); i++ {
+			if err := validateStructTags(val.Index(i).Interface(), fmt.Sprintf("%s[%d]", path, i), logger); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Handle map types
+	if t.Kind() == reflect.Map {
+		if val.IsNil() {
+			logger.Debug().
+				Str("path", path).
+				Msg("nil map")
+			return nil
+		}
+		logger.Debug().
+			Str("path", path).
+			Msg("processing map")
+		iter := val.MapRange()
+		for iter.Next() {
+			key := iter.Key()
+			value := iter.Value()
+			if err := validateStructTags(value.Interface(), fmt.Sprintf("%s[%v]", path, key), logger); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Handle channel types
+	if t.Kind() == reflect.Chan {
+		logger.Debug().
+			Str("path", path).
+			Msg("skipping channel")
+		return nil
+	}
+
+	// Only process struct types
+	if t.Kind() != reflect.Struct {
+		logger.Debug().
+			Str("kind", t.Kind().String()).
+			Str("path", path).
+			Msg("skipping non-struct type")
+		return nil
+	}
+
+	logger.Debug().
+		Str("struct", t.Name()).
+		Str("path", path).
+		Msg("processing struct")
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fieldValue := val.Field(i)
+		fieldPath := path
+		if fieldPath != "" {
+			fieldPath += "."
+		}
+		fieldPath += field.Name
+
+		// Skip validation if the field is not set (zero value)
+		if fieldValue.IsZero() {
+			logger.Debug().
+				Str("field", fieldPath).
+				Msg("skipping unset field")
+			continue
+		}
+
+		logger.Debug().
+			Str("field", fieldPath).
+			Str("tags", string(field.Tag)).
+			Str("type", field.Type.String()).
+			Str("kind", field.Type.Kind().String()).
+			Msg("checking field")
+
+		// Check all known struct tags
+		TagDeprecated.Validate(field, fieldPath, logger)
+
+		// Get the value to validate, dereferencing if it's a pointer
+		valueToValidate := fieldValue.Interface()
+		if field.Type.Kind() == reflect.Ptr && !fieldValue.IsNil() {
+			valueToValidate = fieldValue.Elem().Interface()
+		}
+
+		if err := validateStructTags(valueToValidate, fieldPath, logger); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
