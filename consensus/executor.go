@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -27,18 +28,18 @@ type execResult[R any] struct {
 }
 
 // resultToHash converts a result to a string representation for comparison
-func (e *executor[R]) resultToHash(result R, exec failsafe.Execution[R]) (string, error) {
-	return e.resultToJsonRpcResponse(result, exec).CanonicalHash()
+func (e *executor[R]) resultToHash(context context.Context, result R, exec failsafe.Execution[R]) (string, error) {
+	return e.resultToJsonRpcResponse(context, result, exec).CanonicalHash()
 }
 
 // resultToRawString converts a result to its raw string representation
-func (e *executor[R]) resultToJsonRpcResponse(result R, exec failsafe.Execution[R]) *common.JsonRpcResponse {
+func (e *executor[R]) resultToJsonRpcResponse(context context.Context, result R, exec failsafe.Execution[R]) *common.JsonRpcResponse {
 	resp, ok := any(result).(*common.NormalizedResponse)
 	if !ok {
 		return nil
 	}
 
-	jr, err := resp.JsonRpcResponse(exec.Context())
+	jr, err := resp.JsonRpcResponse(context)
 	if err != nil {
 		return nil
 	}
@@ -48,6 +49,9 @@ func (e *executor[R]) resultToJsonRpcResponse(result R, exec failsafe.Execution[
 
 func (e *executor[R]) Apply(innerFn func(failsafe.Execution[R]) *failsafeCommon.PolicyResult[R]) func(failsafe.Execution[R]) *failsafeCommon.PolicyResult[R] {
 	return func(exec failsafe.Execution[R]) *failsafeCommon.PolicyResult[R] {
+		context, span := common.StartSpan(exec.Context(), "consensus.executor")
+		defer span.End()
+
 		parentExecution := exec.(policy.ExecutionInternal[R])
 		executions := make([]policy.ExecutionInternal[R], e.requiredParticipants)
 		executionWaitGroup := sync.WaitGroup{}
@@ -124,7 +128,7 @@ func (e *executor[R]) Apply(innerFn func(failsafe.Execution[R]) *failsafeCommon.
 					continue
 				}
 				// Extract just the response data for comparison
-				resultHash, err := e.resultToHash(r.result, exec)
+				resultHash, err := e.resultToHash(context, r.result, exec)
 				if err != nil {
 					e.logger.Error().
 						Err(err).
@@ -176,13 +180,13 @@ func (e *executor[R]) Apply(innerFn func(failsafe.Execution[R]) *failsafeCommon.
 				}
 
 				// Track misbehaving upstreams
-				e.trackMisbehavingUpstreams(responses, resultCounts, mostCommonResultHash, parentExecution)
+				e.trackMisbehavingUpstreams(context, responses, resultCounts, mostCommonResultHash, parentExecution)
 
 				// Convert mostCommonResult back to type R
 				var finalResult R
 				for _, r := range responses {
 					if r.err == nil {
-						resultHash, err := e.resultToHash(r.result, exec)
+						resultHash, err := e.resultToHash(context, r.result, exec)
 						if err != nil {
 							e.logger.Error().
 								Err(err).
@@ -243,7 +247,7 @@ func (e *executor[R]) Apply(innerFn func(failsafe.Execution[R]) *failsafeCommon.
 				}
 
 				// Track misbehaving upstreams
-				e.trackMisbehavingUpstreams(responses, resultCounts, mostCommonResultHash, parentExecution)
+				e.trackMisbehavingUpstreams(context, responses, resultCounts, mostCommonResultHash, parentExecution)
 
 				// Handle dispute according to behavior
 				switch e.disputeBehavior {
@@ -303,7 +307,7 @@ func (e *executor[R]) createRateLimiter(upstreamId string) ratelimiter.RateLimit
 	return limiter
 }
 
-func (e *executor[R]) trackMisbehavingUpstreams(responses []*execResult[R], resultCounts map[string]int, mostCommonResultHash string, execution policy.ExecutionInternal[R]) {
+func (e *executor[R]) trackMisbehavingUpstreams(context context.Context, responses []*execResult[R], resultCounts map[string]int, mostCommonResultHash string, execution policy.ExecutionInternal[R]) {
 	// Count total valid responses
 	totalValidResponses := 0
 	for _, count := range resultCounts {
@@ -326,7 +330,7 @@ func (e *executor[R]) trackMisbehavingUpstreams(responses []*execResult[R], resu
 			continue
 		}
 
-		resultHash, err := e.resultToHash(response.result, execution)
+		resultHash, err := e.resultToHash(context, response.result, execution)
 		if err != nil {
 			e.logger.Error().
 				Err(err).
