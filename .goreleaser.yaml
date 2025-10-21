@@ -76,7 +76,7 @@ release:
     ```
 
 sboms:
-  - artifacts: archive
+  - artifacts: binary
     cmd: syft
     # some extra environment variables to help with license scanning
     env:

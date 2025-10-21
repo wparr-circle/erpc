@@ -442,7 +442,7 @@ jobs:
           DIGEST_RELEASE=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}:${{ steps.version.outputs.VERSION }})
           docker pull ghcr.io/${{ steps.meta.outputs.repo }}:latest
           DIGEST_LATEST=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}:latest)
-          echo "digest_release=$#DIGEST_RELEASE#*@}" >> "$GITHUB_OUTPUT"
+          echo "digest_release=${DIGEST_RELEASE#*@}" >> "$GITHUB_OUTPUT"
           echo "digest_latest=${DIGEST_LATEST#*@}" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance (Docker Manifest Main)
