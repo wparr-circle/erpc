@@ -15,7 +15,9 @@ on:
       - main
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
   pull-requests: write
   packages: write
 
@@ -126,6 +128,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Syft
+        uses: anchore/sbom-action/download-syft@aa0e114b2e19480f157109b9922bda359bd98b90 # v0.20.8
+
       # Extract version from commit message
       - name: Extract version
         id: version
@@ -157,6 +162,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-checksums: ./dist/checksums.txt
 
       # Setup pnpm + node and install dependencies
       - name: Setup pnpm
@@ -271,6 +281,7 @@ jobs:
           build-args: |
             VERSION=main
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: true
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
 
       - name: Build+push by digest (release)
@@ -283,7 +294,15 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: true
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
+
+      - name: Attest build provenance (Docker Build)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
+          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') ? steps.build_release.outputs.digest : steps.build_main.outputs.digest }}"
+          push-to-registry: true
 
   docker-build-arm64:
     runs-on: blacksmith-8vcpu-ubuntu-2404-arm
@@ -332,6 +351,7 @@ jobs:
           build-args: |
             VERSION=main
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: true
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
 
       - name: Build+push by digest (release)
@@ -344,7 +364,15 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
             COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          sbom: true
           outputs: type=registry,name=ghcr.io/${{ steps.meta.outputs.repo }},push-by-digest=true
+      
+      - name: Attest build provenance (Docker Build)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
+          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') ? steps.build_release.outputs.digest : steps.build_main.outputs.digest }}"
+          push-to-registry: true
 
   docker-manifest:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -372,6 +400,7 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create multi-arch manifest for main
+        id: main
         if: github.event.inputs.version_tag == ''
         run: |
           docker buildx imagetools create \
@@ -379,14 +408,47 @@ jobs:
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-amd64.outputs.digest_main }} \
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-arm64.outputs.digest_main }}
 
+          DIGEST_MAIN=$(crane digest ghcr.io/${{ steps.meta.outputs.repo }}:main)
+          echo "digest_main=$DIGEST_MAIN" >> "$GITHUB_OUTPUT"
+
       - name: Create multi-arch manifests for release
+        id: release
         if: "contains(github.event.head_commit.message, 'chore: release')"
         run: |
           docker buildx imagetools create \
             -t ghcr.io/${{ steps.meta.outputs.repo }}:${{ steps.version.outputs.VERSION }} \
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-amd64.outputs.digest_release }} \
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-arm64.outputs.digest_release }}
+          
           docker buildx imagetools create \
             -t ghcr.io/${{ steps.meta.outputs.repo }}:latest \
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-amd64.outputs.digest_release }} \
             ghcr.io/${{ steps.meta.outputs.repo }}@${{ needs.docker-build-arm64.outputs.digest_release }}
+          
+          DIGEST_RELEASE=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}:${{ steps.version.outputs.VERSION }})
+          DIGEST_LATEST=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/${{ steps.meta.outputs.repo }}:latest)
+          echo "digest_release=$DIGEST_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "digest_latest=$DIGEST_LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance (Docker Manifest Main)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
+          subject-digest: "${{ steps.main.outputs.digest_main }}"
+          push-to-registry: true
+
+      - name: Attest build provenance (Docker Manifest Release)
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
+          subject-digest: "${{ steps.release.outputs.digest_release }}"
+          push-to-registry: true
+
+      - name: Attest build provenance (Docker Manifest Latest)
+        if: "contains(github.event.head_commit.message, 'chore: release')"
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
+          subject-digest: "${{ steps.release.outputs.digest_latest }}"
+          push-to-registry: true
