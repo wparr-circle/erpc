@@ -24,7 +24,7 @@ permissions:
 jobs:
   # Create Release PR - only on workflow_dispatch
   prepare-release:
-    runs-on: "${{ github.repository_owner == 'erpc' ? 'blacksmith-8vcpu-ubuntu-2404' : 'ubuntu-24.04' }}"
+    runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     if: github.event_name == 'workflow_dispatch'
     outputs:
       version: ${{ github.event.inputs.version_tag }}
@@ -235,7 +235,7 @@ jobs:
 
   # Native single-arch builds on matching runners; then compose a multi-arch manifest
   docker-build-amd64:
-    runs-on: "${{ github.repository_owner == 'erpc' ? 'blacksmith-8vcpu-ubuntu-2404' : 'ubuntu-24.04' }}"
+    runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [prepare-release, release]
     if: always() && github.ref == 'refs/heads/main'
     timeout-minutes: 35
@@ -301,11 +301,11 @@ jobs:
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
-          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') ? steps.build_release.outputs.digest : steps.build_main.outputs.digest }}"
+          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') && steps.build_release.outputs.digest || steps.build_main.outputs.digest }}"
           push-to-registry: true
 
   docker-build-arm64:
-    runs-on: "${{ github.repository_owner == 'erpc' ? 'blacksmith-8vcpu-ubuntu-2404-arm' : 'ubuntu-24.04-arm' }}"
+    runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-8vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}"
     needs: [prepare-release, release]
     if: always() && github.ref == 'refs/heads/main'
     timeout-minutes: 35
@@ -371,11 +371,11 @@ jobs:
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-name: ghcr.io/${{ steps.meta.outputs.repo }}
-          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') ? steps.build_release.outputs.digest : steps.build_main.outputs.digest }}"
+          subject-digest: "${{ contains(github.event.head_commit.message, 'chore: release') && steps.build_release.outputs.digest || steps.build_main.outputs.digest }}"
           push-to-registry: true
 
   docker-manifest:
-    runs-on: "${{ github.repository_owner == 'erpc' ? 'blacksmith-4vcpu-ubuntu-2404' : 'ubuntu-24.04' }}"
+    runs-on: "${{ github.repository_owner == 'erpc' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
     needs: [docker-build-amd64, docker-build-arm64]
     if: always() && github.ref == 'refs/heads/main'
     steps:
